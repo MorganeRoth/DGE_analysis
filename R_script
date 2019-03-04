@@ -1,0 +1,649 @@
+###################################################################
+##### Differential gene expression analysis and GO enrichment #####
+###################################################################
+
+# Packages needed
+library(edgeR)
+library(topGO)
+library(ggplot2)
+
+##################
+## Prepare data ##
+##################
+
+# Load description of samples 
+
+targets<-readTargets("~/Documents/Thèse/Bioinfo/DGE/from_080116_all/targets_36samples_11.2018.txt", row.names=1, sep="\t")
+
+# Load count data generated with HTseq #
+
+htseq<-read.table("~/Documents/Thèse/Bioinfo/DGE/from_080116_all/htseq_36samples_clean_080316.txt", sep="\t", h=T, row.names=1)
+
+# Create DGEList object
+
+dge<- DGEList(counts=htseq[,1:36], genes=rownames(htseq), group=targets$cross_type)
+
+# Filter data to keep genes expressed at least in 2 libraries  (more than 1 count per million)
+
+keep<-rowSums(cpm(dge)>1) >=2
+d_filter<-dge[keep,]
+dim(dge) ## 34,725 annotated genes
+dim(d_filter) # 22,006 genes left
+
+# Normalize counts
+
+dge<-d_filter
+dge$samples$lib.size <- colSums(dge$counts)
+dge<- calcNormFactors(dge)
+
+# Plot MDS
+# Here with all samples
+targets$color1<-c(rep(c(rep("black", 3),"#31a354", "blue","#31a354","blue", "#de2d26", "#de2d26", rep("black", 3)), 3))
+pdf(file="MDS_all.pdf", height=6.5, width=6.5, family="ArialMT")
+plotMDS(d_filter, labels=targets$cross_spe, col=targets$color1, 
+        cex=1.2,cex.axis=1.4, cex.lab=1.4,font=2,
+        xlim=c(-4.2,3.4), ylim=c( -2.6, 2.5))
+legend("topleft", legend=c("Intraspecific", "Viable hybrid", "Maternal excess", "Paternal excess"),
+       col=c("black","#31a354","#de2d26", "blue"),
+       pch=16, cex=1.1, text.width=2.1, pt.cex=1.7,y.intersp=1.5)
+dev.off()
+# Here with intraspecific crosses
+targets_intra=targets[-which(targets$cross_type=="inter"),]
+htseq_intra=htseq[,-c(4:9, 16:21,28:33)]
+dge_intra=DGEList(counts=htseq_intra[,1:18], genes=rownames(htseq_intra), group=targets_intra$cross_spe)
+keep=rowSums(cpm(dge_intra)>1) >=2
+d_filter_intra=dge_intra[keep,]
+targets_intra$colour2<-c(rep(c("turquoise2","goldenrod1","purple", "turquoise2", "purple","goldenrod1" ),3))
+
+pdf(file="MDS_intra.pdf", height=6.5, width=6.5, family="ArialMT")
+plotMDS(d_filter_intra, labels=targets_intra$cross_spe, col=targets_intra$colour2, 
+        ylim=c(-4.5,2.3),xlim=c(-3.3,2.3),cex=1.4,cex.axis=1.4, cex.lab=1.3, font=2)
+legend("bottomleft", legend=c("[AA]", "[CC]", "[PP]"),
+       col=c("goldenrod1", "turquoise2", "purple"),
+       pch=16, cex=1.5, text.width=0.6, pt.cex=2, y.intersp=1.5)
+dev.off()
+
+## Extract normalized counts for other analyses such as heatmaps ##
+
+y <- cpm(dge, prior.count=2, log=TRUE, normalized.lib.sizes=TRUE)
+merg<-y[,(1:12)]
+# Calculate mean counts for each cross
+for (i in seq(1:12)) {
+  merg[,i]=(y[,i]  + y[,i+12] + y[,i+12] )/3
+}
+write.table(merg, file="cpm_for_heatmaps_11.2018.txt", sep="\t", quote=F, row.names=F)
+
+##################
+## DGE analysis ##
+##################
+
+# PART 1a: compare intraspecific crosses to each other
+
+# Create design for the test 
+design <- model.matrix(~0+cross_ID, data=targets) ## removes intercept
+# Look at dispersion of expression with increasing expression
+dge<-estimateGLMTrendedDisp(dge, design) 
+plotBCV(dge)
+# Coefficient of variation of lowly expressed genes is high
+# Keep trended dispersion model
+# Fit a GLM model
+fit <- glmFit(dge,design)
+# Create contrast table
+intra<-makeContrasts(cross_IDPP-cross_IDAA,
+                     cross_IDPP-cross_IDCC,
+                     cross_IDCC-cross_IDAA,
+                     levels=colnames(design))
+combine_comparisons1<-function (contrast_list, name) {
+  table_res<-data.frame(genes=rownames(dge))
+  for (i in 1:dim(contrast_list)[2]) {
+    comp <- glmLRT(fit, contrast=contrast_list[,i])
+    topTags(comp)
+    # Apply test with Benjamini Hochberg correction of p-values
+    print(summary(res <- decideTestsDGE(comp, p=0.05, adjust="BH")))
+    # Save results in table
+    table_res=cbind(table_res, as.data.frame(res))
+    colnames(table_res)[i+1]<-dimnames(contrast_list)$Contrasts[i]
+  }
+  # save results
+  write.table(table_res, file=paste0(name, "_dge.txt" ), quote=F, row.names=F, sep="\t")
+}
+
+combine_comparisons1(intra, "interspecific_comparisons")
+intra_comp<-read.table("interspecific_comparisons_dge.txt", sep="\t", h=T )
+summary(apply(intra_comp, 2, as.factor))
+
+
+# PART 2a: compare hybrid crosses to intraspecific crosses
+# Create the design for the test - here with single crosses
+design <- model.matrix(~0+cross_spe, data=targets) ## removes intercept
+# Look at dispersion of expression with increasing expression
+dge<-estimateGLMTrendedDisp(dge, design) 
+plotBCV(dge)
+# Coefficient of variation of lowly expressed genes is high
+# Keep trended dispersion model
+# Fit a GLM model
+fit <- glmFit(dge,design)# Create explicit lists of contrasts
+AP_intra<-makeContrasts(cross_speAP-cross_speAA1,
+                        cross_speAP-cross_speAA2,
+                        cross_speAP-cross_spePP1,
+                        cross_speAP-cross_spePP2,
+                        levels=colnames(design))  
+PA_intra<-makeContrasts(cross_spePA-cross_speAA1,
+                        cross_spePA-cross_speAA2,
+                        cross_spePA-cross_spePP1,
+                        cross_spePA-cross_spePP2,
+                        levels=colnames(design))  
+AC_intra<-makeContrasts(cross_speAC-cross_speAA1,
+                        cross_speAC-cross_speAA2,
+                        cross_speAC-cross_speCC1,
+                        cross_speAC-cross_speCC2,
+                        levels=colnames(design))  
+CA_intra<-makeContrasts(cross_speCA-cross_speAA1,
+                        cross_speCA-cross_speAA2,
+                        cross_speCA-cross_speCC1,
+                        cross_speCA-cross_speCC2,
+                        levels=colnames(design))    
+CP_intra<-makeContrasts(cross_speCP-cross_speCC1,
+                        cross_speCP-cross_speCC2,
+                        cross_speCP-cross_spePP1,
+                        cross_speCP-cross_spePP2,
+                        levels=colnames(design))  
+PC_intra<-makeContrasts(cross_spePC-cross_speCC1,
+                        cross_spePC-cross_speCC2,
+                        cross_spePC-cross_spePP1,
+                        cross_spePC-cross_spePP2,
+                        levels=colnames(design))  
+
+# combine all comparisons and retain overlap
+combine_comparisons2<-function (contrast_list, name) {
+  table_res<-data.frame(genes=rownames(dge))
+  for (i in 1:dim(contrast_list)[2]) {
+  print(i)
+  comp <- glmLRT(fit, contrast=contrast_list[,i])
+  topTags(comp)
+  # Apply test with Benjamini Hochberg correction of p-values
+  summary(res <- decideTestsDGE(comp, p=0.05, adjust="BH"))
+  # Save results in table
+  table_res<-cbind(table_res, as.data.frame(res))
+  colnames(table_res)[i+1]<-dimnames(contrast_list)$Contrasts[1]
+  }
+  # keep the overlap of DEGs over comparisons
+  table_res$overlap<-rep(0, dim(table_res)[1])
+  table_res[which(rowSums(table_res[,2:5])==4),6]=1
+  table_res[which(rowSums(table_res[,2:5])==-4),6]=-1
+  colnames(table_res)[6]<-paste0(name, "_overlap")
+  write.table(table_res, file=paste0(name, "_dge.txt" ), quote=F, row.names=F, sep="\t")
+}
+
+all_comp<-c("AP", "PA", "CP", "PC", "AC", "CA")
+overlaps<-data.frame(genes=rownames(dge))
+a<-0
+for (i in all_comp) {
+  a=a+1
+  n<-paste0(i, "_intra")
+  combine_comparisons2(get(n),n)
+  res<-read.table(paste0(n, "_dge.txt"), sep="\t", h=T )
+  overlaps<-cbind(overlaps, res[,6])
+  colnames(overlaps)[a+1]=n
+}
+overlaps<-apply(overlaps, 2, as.factor)
+summary(overlaps)
+write.table(overlaps, file="DGE_hybrids_intra_overlaps.txt", quote=F, row.names=F, sep="\t")
+
+# PART 3a: compare reciprocal crosses to each other
+# Create explicit contrasts, keep previous model
+reciprocals<-makeContrasts(cross_speAP-cross_spePA,
+                           cross_speCP-cross_spePC,
+                           cross_speAC-cross_speCA,
+                           cross_spePP1-cross_spePP2,
+                           cross_speCC1-cross_speCC2,
+                           cross_speAA1-cross_speAA2,
+                          levels=colnames(design))
+
+# PART 4: compare crosses with same HSF phenotype (paternal or maternal excess)
+parental_excess<-makeContrasts(cross_speAP-cross_speCP,
+                               cross_spePC-cross_spePA,
+                               levels=colnames(design))  
+combine_comparisons1(parental_excess, "parental_excess")
+PE<-read.table("parental_excess_dge.txt", sep="\t", h=T )
+summary(apply(PE, 2, as.factor))
+summary(apply(recip, 2, as.factor))
+
+# summary of comparisons
+summary(apply(recip, 2, as.factor))
+
+## look at overlap between AP-PA and CP-PC comparisons
+
+dim(recip[which(rowSums(recip[,2:3])==2),]) # 2603 genes overexpressed in both AP and CP crosses compared to PA and PC crosses
+dim(recip[which(rowSums(recip[,2:3])==-2),]) # 1874 genes underexpressed in both AP and CP crosses compared to PA and PC crosses
+
+
+####################
+## GO enrichments ##
+####################
+
+# Function for GO-term enrichment
+goforit <- function (map, toenrich, univ, string_name_test) {
+  geneNames <- names(map)
+  mygenes<-toenrich$gene
+  mygenes<-as.character(as.matrix(mygenes))
+  geneList <- factor(as.integer(geneNames %in% mygenes))
+  names(geneList) <- geneNames
+  univ_test<- map[which(names(map) %in% as.character(as.matrix(univ)))]
+  univ_test   
+  expressNames<-names(univ_test)
+  GOdata_MF <- new("topGOdata", ontology = "MF", allGenes = geneList,
+                   annot = annFUN.gene2GO, gene2GO = univ_test)
+  GOdata_BP <- new("topGOdata", ontology = "BP", allGenes = geneList,
+                   annot = annFUN.gene2GO, gene2GO = univ_test)
+  GOdata_CC <- new("topGOdata", ontology = "CC", allGenes = geneList,
+                   annot = annFUN.gene2GO, gene2GO = univ_test)                 
+## use the default algorithm weight01 (do not put "algorithm=..")  
+  resultFisher_MF <- runTest(GOdata_MF, statistic = "fisher")
+  resultFisher_BP <- runTest(GOdata_BP, statistic = "fisher")
+  resultFisher_CC <- runTest(GOdata_CC, statistic = "fisher")
+
+  allRes_MF <- GenTable(GOdata_MF, classicFisher = resultFisher_MF,
+                        orderBy = "classicFisher", ranksOf = "classicFisher", topNodes = 50)
+  allRes_BP <- GenTable(GOdata_BP, classicFisher = resultFisher_BP,
+                        orderBy = "classicFisher", ranksOf = "classicFisher", topNodes = 50)
+  allRes_CC <- GenTable(GOdata_CC, classicFisher = resultFisher_CC,
+                        orderBy = "classicFisher", ranksOf = "classicFisher", topNodes = 50)
+  allRes_MF$cor_fdr<-p.adjust(allRes_MF[,6], method = "fdr")
+  allRes_MF$cat<-rep("MF", dim(allRes_MF)[1])
+  allRes_BP$cor_fdr<-p.adjust(allRes_BP[,6], method = "fdr")
+  allRes_BP$cat<-rep("BP", dim(allRes_BP)[1])
+  allRes_CC$cor_fdr<-p.adjust(allRes_CC[,6], method = "fdr")
+  allRes_CC$cat<-rep("CC", dim(allRes_CC)[1])
+  allRes<-rbind(allRes_BP, allRes_MF, allRes_CC)
+  write.table(allRes, file=paste("TopGO_exp_universe", string_name_test, "txt",sep="."), row.names=F, quote=F, sep="\t")
+}
+
+setwd("~/Documents/Bioinfo/Analyses_3d_article_05.2017/TopGO/")
+
+# load annotations obtained from http://plants.ensembl.org/biomart/martview/7af0fe4fc3543840779492936f3dbeb0
+# Annotation ITAG 2.4
+map<-readMappings("/Users/roth/Documents/Bioinfo/ontology/topgo/out.txt", IDsep=",", sep="\t")
+# create a file for the gene universe (20,006 genes)
+univ<-dge$genes
+dim(univ)
+# PART 1b: GO enrichment for interspecific comparisons of intraspecific crosses
+# PP-AA, PP-CC and CC-AA
+intra_comp<-read.table("interspecific_comparisons_dge.txt", sep="\t", h=T)
+PP_AA<-data.frame(gene=intra_comp[which(intra_comp[,2] == 1|intra_comp[,2] == -1),1  ])
+PP_CC<-data.frame(gene=intra_comp[which(intra_comp[,3] == 1|intra_comp[,3] == -1),1  ])
+CC_AA<-data.frame(gene=intra_comp[which(intra_comp[,4] == 1|intra_comp[,4] == -1),1  ])
+goforit (map, PP_AA, univ, "PP_AA") 
+goforit (map, PP_CC, univ, "PP_CC") 
+goforit (map, CC_AA, univ, "CC_AA") 
+
+# PART 1b: GO enrichment for comparisons between hybrids and intraspecific crosses
+target<-read.table("/Users/roth/Documents/Bioinfo/DGE/from_080116_all/12.2018/DGE_hybrids_intra_overlaps.txt", h=T, sep="\t")
+summary(apply(target, 2, as.factor))
+
+# create GO enrichment file for each hybrid-intra cross comparison
+AP <- data.frame(gene=target[which(target$AP_intra == 1 | target$AP_intra == -1),1  ])
+goforit (map, AP, univ, "AP_intra") 
+PA <- data.frame(gene=target[which(target$PA_intra == 1 | target$PA_intra == -1),1  ])
+goforit (map, PA, univ, "PA_intra") 
+CP <- data.frame(gene=target[which(target$CP_intra == 1 | target$CP_intra == -1),1  ])
+goforit (map, CP, univ, "CP_intra")  
+PC <- data.frame(gene=target[which(target$PC_intra == 1 | target$PC_intra == -1),1  ])
+goforit (map, PC, univ, "PC_intra")  
+AC <- data.frame(gene=target[which(target$AC_intra == 1 | target$AC_intra == -1),1  ])
+dim(AC)
+goforit (map, AC, univ, "AC_intra")   
+CA <- data.frame(gene=target[which(target$CA_intra == 1 | target$CA_intra == -1),1  ])
+goforit (map, CA, univ, "CA_intra")   
+
+# focus on dowregulated genes in hybrid crosses
+
+down_patexcess <- data.frame(gene=target[which(target$CP_intra == -1 | target$AP_intra == -1),1  ])
+dim(down_patexcess)
+goforit (map, down_patexcess, univ, "down_patexcess") 
+down_matexcess <- data.frame(gene=target[which(target$PC_intra== -1 | target$PA_intra == -1),1  ])
+dim(down_matexcess)
+goforit (map, down_matexcess, univ, "down_matexcess") 
+
+up_patexcess <- data.frame(gene=target[which(target$CP_intra == 1 | target$AP_intra == 1),1  ])
+dim(up_patexcess)
+goforit (map, up_patexcess, univ, "up_patexcess") 
+up_matexcess <- data.frame(gene=target[which(target$PC_intra== 1 | target$PA_intra == 1),1  ])
+dim(up_matexcess)
+goforit (map, up_matexcess, univ, "up_matexcess") 
+
+# create GO enrichment file for each comparison between reciprocal crosses
+recip<-read.table("./reciprocals_dge.txt", sep="\t", h=T )
+
+AP_PA_up <- data.frame(gene=recip[which(recip[,2] == 1),1 ])
+goforit (map, AP_PA_up, univ, "AP_PA_up") 
+AP_PA_down <- data.frame(gene=recip[which(recip[,2] == -1),1 ])
+goforit (map, AP_PA_down, univ, "AP_PA_down") 
+
+CP_PC_up <- data.frame(gene=recip[which(recip[,3] == 1),1 ])
+goforit (map, CP_PC_up, univ, "CP_PC_up") 
+CP_PC_down <- data.frame(gene=recip[which(recip[,3] == -1),1 ])
+goforit (map, CP_PC_down, univ, "CP_PC_down") 
+
+AC_CA_up <- data.frame(gene=recip[which(recip[,4] == 1),1 ])
+goforit (map, AC_CA_up, univ, "AC_CA_up") 
+AC_CA_down <- data.frame(gene=recip[which(recip[,4] == -1),1 ])
+goforit (map, AC_CA_down, univ, "AC_CA_down") 
+
+PP1_PP2_up <- data.frame(gene=recip[which(recip[,5] == 1),1 ])
+goforit (map, PP1_PP2_up, univ, "PP1_PP2_up") 
+PP1_PP2_down <- data.frame(gene=recip[which(recip[,5] == -1),1 ])
+goforit (map, PP1_PP2_down, univ, "PP1_PP2_down") 
+
+CC1_CC2_up <- data.frame(gene=recip[which(recip[,6] == 1),1 ])
+goforit (map, CC1_CC2_up, univ, "CC1_CC2_up") 
+CC1_CC2_down <- data.frame(gene=recip[which(recip[,6] == -1),1 ])
+goforit (map, CC1_CC2_down, univ, "CC1_CC2_down") 
+
+AA1_AA2_up <- data.frame(gene=recip[which(recip[,7] == 1),1 ])
+goforit (map, AA1_AA2_up, univ, "AA1_AA2_up") 
+AA1_AA2_down <- data.frame(gene=recip[which(recip[,7] == -1),1 ])
+goforit (map, AA1_AA2_down, univ, "AA1_AA2_down") 
+
+# look at overlapping genes in CP-PC and AP-PA comparisons
+
+pat_excess_up <- data.frame(gene=recip[which(recip[,2] == 1 & recip[,3] == 1 ),1 ])
+goforit (map, pat_excess_up, univ, "pat_excess_up") 
+mat_excess_up <- data.frame(gene=recip[which(recip[,2] == -1 & recip[,3] == -1 ),1 ])
+goforit (map, mat_excess_up, univ, "mat_excess_up") 
+
+# concatenate all analyses in one file
+ll<-list.files()
+topgo<-grep("TopGO+", ll, perl=T, value=T)
+myfile<-read.delim(topgo[1], h=T, sep="\t")
+myfile$comparisons=as.factor(rep(paste(topgo[1]), dim(myfile)[1]))
+
+for (i in topgo[-1]) {
+  d<-read.delim(paste(i), h=T, sep="\t")
+  d$comparisons=as.factor(rep(paste(i), dim(d)[1]))
+  myfile<-rbind(myfile, d)
+}
+dim(myfile)
+myfile<-myfile[myfile$cor_fdr<=0.05,]
+write.table(myfile, file="allTopGO_comparisons.txt", quote=F, sep="\t", row.names=F)
+
+##################
+#### Heatmaps ####
+##################
+library(ggplot2)
+library(stats)
+library(reshape)
+library(gplots)
+library("RColorBrewer")
+library(extrafont)
+par(family="Arial")
+hmcol<-brewer.pal(9,"BuPu")
+
+counts_norm<-read.table("~/Documents/Thèse/Bioinfo/DGE/from_080116_all/cpm_for_heatmaps_11.2018.txt", h=T, sep="\t")
+colnames(counts_norm)<-targets[1:12,9]
+counts_norm<-cbind(substr(row.names(htseq), 1,14), counts_norm)
+colnames(counts_norm)[1]<-"gene"
+summary(counts_norm)
+dim(counts_norm)
+
+counts_norm$AA<-apply(counts_norm[,c(3,13)], 1, mean)
+counts_norm$CC<-apply(counts_norm[,c(2,11)], 1, mean)
+counts_norm$PP<-apply(counts_norm[,c(4,12)], 1, mean)
+counts_norm<-counts_norm[which(counts_norm$gene %in% substr(dge$genes$genes, 1, 14)),]
+
+pant_annot=read.table("~/Documents/Thèse/Bioinfo/Analyses_3d_article_05.2017/panther_annot.txt",  sep="\t", h=T, quote = "", 
+row.names = NULL, 
+stringsAsFactors = FALSE)
+
+myheatmapall= function (term, mytitle) {
+  # d=pant_annot[grep(term, pant_annot$family),1]
+  d=read.table("~/Documents/Thèse/Bioinfo/DGE/from_080116_all/12.2018/cell_cycle_genes.txt", sep="\t", h=T)
+  d=as.factor(d$gene)
+  counts_norm_sel<-counts_norm[counts_norm$gene %in% d,-c(2:4, 11:13)]
+  print(length(d))
+  rownames(counts_norm_sel) = counts_norm_sel$gene
+  counts_norm_sel<-counts_norm_sel[,-1]
+  n<-dim(counts_norm_sel)[1]
+  print(dim(counts_norm_sel))
+  counts_norm_sel=as.matrix(scale(counts_norm_sel))
+  hr <- hclust(as.dist(1-cor(t(counts_norm_sel), method="pearson")), method="complete")
+  hc <- hclust(as.dist(1-cor(counts_norm_sel, method="pearson")), method="complete")
+  heatmap.2(t(counts_norm_sel), col=hmcol,Rowv=as.dendrogram(hc) , Colv=as.dendrogram(hr) , 
+            scale="column", key=T, keysize=2,
+            density.info="none", trace="none",
+            key.title = "",
+            key.par(cex.axis=5),
+            cexRow = 2, labCol=NA,
+            main=expr(paste(!!mytitle, " (", italic(n)," = ", !!n,")", sep=" ")))
+}
+
+pdf(file="MADS.pdf", width=7, height=7, family="ArialMT")
+myheatmapall("MADS", "MADS-Box TFs")
+dev.off()
+
+pdf(file="cellcycle.pdf", width=7, height=7, family="ArialMT")
+myheatmapall("CELLCYCLE", "Cell Cycle")
+dev.off()
+
+pdf(file="E3.pdf", width=7, height=7, family="ArialMT")
+myheatmapall("E3", "E3 Ubiquitin Ligases")
+dev.off()
+setwd("~/Documents/Thèse/Bioinfo/DGE/from_080116_all/12.2018/")
+bmp(filename="cellcycle.bmp", width=700, height=700,family="ArialMT", res=100)
+myheatmapall("CELLCYCLE", "Cell Cycle")
+dev.off()
+
+bmp(filename="MADS.bmp", width=700, height=700,family="ArialMT", res=100)
+myheatmapall("MADS", "MADS-Box TFs")
+dev.off()
+
+bmp(file="E3.bmp", width=700, height=700,family="ArialMT", res=100)
+myheatmapall("E3", "E3 Ubiquitin Ligases")
+dev.off()
+#######################
+#### Venn Diagrams ####
+#######################
+
+library(reshape2)
+library(venneuler)
+library(RColorBrewer)
+
+# load data
+
+# reciprocal crosses
+recip<-read.table("reciprocals_dge.txt", sep="\t", h=T)
+recip<-as.data.frame(apply(recip, 2, as.factor))
+colnames(recip)<-c("genes","AP_PA", "CP_PC", "AC_CA", "PP1_PP2", "CC1_CC2", "AA1_AA2")
+
+recip_venn <- venneuler(c("AP-PA"=dim(recip[which(recip$AP_PA != " 0"),])[1], 
+                   "CP-PC"=dim(recip[which(recip$CP_PC != " 0"),])[1], 
+                   "AC-CA"=dim(recip[which(recip$AC_CA != " 0"),])[1], 
+                   "AP-PA&CP-PC"=dim(recip[which(recip$AP_PA != " 0" & recip$CP_PC!= " 0"),])[1], 
+                   "CP-PC&AC-CA"=dim(recip[which(recip$CP_PC != " 0" & recip$AC_CA != " 0"),])[1] ,
+                   "AP-PA&AC-CA"=dim(recip[which(recip$AP_PA != " 0" & recip$AC_CA != " 0"),])[1] ,
+                   "AP-PA&CP-PC&AC-CA"=dim(recip[which(recip$AP_PA != " 0" & recip$CP_PC != " 0"& recip$AC_CA != " 0"),])[1] ))
+recip_venn$labels<-c("","","")
+par(mfrow=c(1,1), mar=c(0,0,0,0))
+plot(recip_venn, col=c("#636363", "#636363", "#636363"))
+
+recip_venn_patup <- venneuler(c("AP-PA"=dim(recip[which(recip$AP_PA == " 1"),])[1], 
+                          "CP-PC"=dim(recip[which(recip$CP_PC == " 1"),])[1], 
+                          "AC-CA"=dim(recip[which(recip$AC_CA == " 1"),])[1], 
+                          "AP-PA&CP-PC"=dim(recip[which(recip$AP_PA == " 1" & recip$CP_PC== " 1"),])[1], 
+                          "CP-PC&AC-CA"=dim(recip[which(recip$CP_PC == " 1" & recip$AC_CA == " 1"),])[1] ,
+                          "AP-PA&AC-CA"=dim(recip[which(recip$AP_PA == " 1" & recip$AC_CA == " 1"),])[1] ,
+                          "AP-PA&CP-PC&AC-CA"=dim(recip[which(recip$AP_PA == " 1" & recip$CP_PC == " 1"& recip$AC_CA == " 1"),])[1] ))
+recip_venn_patup$labels<-c("","","")
+plot(recip_venn_patup, col=c("#636363", "#636363", "#636363"))
+
+recip_venn_patdown <- venneuler(c("AP-PA"=dim(recip[which(recip$AP_PA == "-1"),])[1], 
+                                "CP-PC"=dim(recip[which(recip$CP_PC == "-1"),])[1], 
+                                "AC-CA"=dim(recip[which(recip$AC_CA == "-1"),])[1], 
+                                "AP-PA&CP-PC"=dim(recip[which(recip$AP_PA == "-1" & recip$CP_PC== "-1"),])[1], 
+                                "CP-PC&AC-CA"=dim(recip[which(recip$CP_PC == "-1" & recip$AC_CA == "-1"),])[1] ,
+                                "AP-PA&AC-CA"=dim(recip[which(recip$AP_PA == "-1" & recip$AC_CA == "-1"),])[1] ,
+                                "AP-PA&CP-PC&AC-CA"=dim(recip[which(recip$AP_PA == "-1" & recip$CP_PC == "-1"& recip$AC_CA == "-1"),])[1] ))
+
+dim(recip[which(recip$AP_PA == "-1"),])[1]-m-n-l
+m<-dim(recip[which(recip$AP_PA == "-1" &recip$CP_PC == "-1"),])[1] - n 
+l<-dim(recip[which(recip$AP_PA == "-1" &recip$AC_CA == "-1"),])[1] -n
+dim(recip[which(recip$CP_PC == "-1"),])[1] - m - n -w
+w<-dim(recip[which(recip$AC_CA == "-1" &recip$CP_PC == "-1"),])[1] -n
+n<-dim(recip[which(recip$AP_PA == "-1" & recip$CP_PC == "-1"& recip$AC_CA == "-1"),])[1]
+dim(recip[which(recip$AC_CA == "-1"),])[1] -n -l - w
+
+recip_venn_patdown$labels<-c("","","")
+par(mfrow=c(1,2), mar=c(0,0,0,0))
+plot(recip_venn_patup, col=c("#636363", "#636363", "#636363"))
+plot(recip_venn_patdown, col=c("#636363", "#636363", "#636363"))
+
+## look at hybrid-intra DEGs
+hyb_intra<-read.table("DGE_hybrids_intra_overlaps.txt", sep="\t", h=T)
+hyb_intra<-as.data.frame(apply(hyb_intra, 2, as.factor))
+summary(hyb_intra)
+
+# comment: there are hidden spaces before 0 and 1 in tables
+
+par(mfrow=c(1,2), mar=c(0,0,0,0))
+mat <- venneuler(c("PC-intra"=dim(hyb_intra[which(hyb_intra$PC_intra != " 0"),])[1], 
+                   "PA-intra"=dim(hyb_intra[which(hyb_intra$PA_intra != " 0"),])[1], 
+                   "CA-intra"=dim(hyb_intra[which(hyb_intra$CA_intra != " 0"),])[1], 
+                    "PC-intra&PA-intra"=dim(hyb_intra[which(hyb_intra$PC_intra != " 0" & hyb_intra$PA_intra!= " 0"),])[1], 
+                     "PA-intra&CA-intra"=dim(hyb_intra[which(hyb_intra$PA_intra != " 0" & hyb_intra$CA_intra != " 0"),])[1] ,
+                     "PC-intra&PA-intra"=dim(hyb_intra[which(hyb_intra$PA_intra != " 0" & hyb_intra$CA_intra != " 0"),])[1] ,
+                     "PC-intra&PA-intra&CA-intra"=dim(hyb_intra[which(hyb_intra$PC_intra != " 0" & hyb_intra$PA_intra != " 0"& hyb_intra$CA_intra != " 0"),])[1] ),
+                     labels=c("","",""))
+plot(mat)
+
+pat <- venneuler(c("CP-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != " 0"),])[1], 
+                   "AP-intra"=dim(hyb_intra[which(hyb_intra$AP_intra != " 0"),])[1], 
+                   "AC-intra"=dim(hyb_intra[which(hyb_intra$AC_intra != " 0"),])[1], 
+                   "CP-intra&AP-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != " 0" & hyb_intra$AP_intra!= " 0"),])[1], 
+                   "AP-intra&AC-intra"=dim(hyb_intra[which(hyb_intra$AP_intra != " 0" & hyb_intra$AC_intra != " 0"),])[1] ,
+                   "CP-intra&AP-intra"=dim(hyb_intra[which(hyb_intra$AP_intra != " 0" & hyb_intra$AC_intra != " 0"),])[1] ,
+                   "CP-intra&AP-intra&AC-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != " 0" & hyb_intra$AP_intra != " 0"& hyb_intra$AC_intra != " 0"),])[1] ),
+                 labels=c("","",""))
+plot(pat)
+
+matup_patdown <- venneuler(c("PC-intra"=dim(hyb_intra[which(hyb_intra$PC_intra == " 1"),])[1], 
+                   "CP-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != "-1"),])[1], 
+                   "PC-intra&CP-intra"=dim(hyb_intra[which(hyb_intra$PC_intra != " 1" & hyb_intra$CP_intra != "-1"),])[1] ))
+plot(matup_patdown)
+
+matup_patdown <- venneuler(c("PC-intra"=dim(hyb_intra[which(hyb_intra$PC_intra == " 1"),])[1], 
+                             "CP-intra"=dim(hyb_intra[which(hyb_intra$CP_intra == "-1"),])[1], 
+                             "PC-intra&CP-intra"=dim(hyb_intra[which(hyb_intra$PC_intra == " 1" & hyb_intra$CP_intra == "-1"),])[1] ))
+plot(matup_patdown)
+
+matup_patdown2 <- venneuler(c("PA-intra"=dim(hyb_intra[which(hyb_intra$PA_intra == " 1"),])[1], 
+                             "AP-intra"=dim(hyb_intra[which(hyb_intra$AP_intra == "-1"),])[1], 
+                             "PA-intra&AP-intra"=dim(hyb_intra[which(hyb_intra$PA_intra == " 1" & hyb_intra$AP_intra == "-1"),])[1] ))
+plot(matup_patdown2)
+
+pat <- venneuler(c("CP-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != " 0"),])[1], 
+                   "AP-intra"=dim(hyb_intra[which(hyb_intra$AP_intra != " 0"),])[1], 
+                   "AC-intra"=dim(hyb_intra[which(hyb_intra$AC_intra != " 0"),])[1], 
+                   "CP-intra&AP-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != " 0" & hyb_intra$AP_intra!= " 0"),])[1], 
+                   "AP-intra&AC-intra"=dim(hyb_intra[which(hyb_intra$AP_intra != " 0" & hyb_intra$AC_intra != " 0"),])[1] ,
+                   "CP-intra&AP-intra"=dim(hyb_intra[which(hyb_intra$AP_intra != " 0" & hyb_intra$AC_intra != " 0"),])[1] ,
+                   "CP-intra&AP-intra&AC-intra"=dim(hyb_intra[which(hyb_intra$CP_intra != " 0" & hyb_intra$AP_intra != " 0"& hyb_intra$AC_intra != " 0"),])[1] ),
+                 labels=c("","",""))
+plot(pat)
+
+recip<-read.table("reciprocals_dge.txt", sep="\t", h=T)
+recip<-as.data.frame(apply(recip, 2, as.factor))
+colnames(recip)<-c("genes","AP_PA", "CP_PC", "AC_CA", "PP1_PP2", "CC1_CC2", "AA1_AA2")
+
+recip_patexcess <- venneuler(c("AP-PA"=dim(all[which(recip$AP_PA == " 1") ,])[1], 
+                     "CP-PC"=dim(all[which(recip$CP_PC == " 1") ,])[1],                                                 
+                     "AP-PA&CP-PC"=dim(all[which(recip$AP_PA == " 1" & recip$CP_PC == " 1") ,])[1])) 
+
+recip_patexcess$labels<-c("","")
+pdf("paternal_excess.pdf", height=4, width=5)
+plot(recip_patexcess, col=c("#1d91c0","#225ea8"))
+dev.off()
+
+recip_matexcess <- venneuler(c("AP-PA"=dim(all[which(recip$AP_PA == "-1") ,])[1], 
+                               "CP-PC"=dim(all[which(recip$CP_PC == "-1") ,])[1],                                                 
+                               "AP-PA&CP-PC"=dim(all[which(recip$AP_PA == "-1" & recip$CP_PC == "-1") ,])[1]))                                                        
+recip_matexcess$labels<-c("AP-PA","")
+pdf("maternal_excess.pdf", height=4, width=5)
+plot(recip_matexcess, col=c("#cb181d","#ef3b2c"))
+dev.off()
+
+#graphics.off()
+
+# Histograms
+
+library(gridExtra)
+library(ggplot2)
+library(reshape)
+
+# prepare data
+all2<-read.table("./12.2018/dge_all_comparisons.txt", sep="\t", h=T)
+mytable<-t(as.data.frame(apply(all2[,2:16], 2, table)))
+mytable<-as.data.frame(mytable[,c(1,3)])
+colnames(mytable)<-c("up", "down")
+mytable$comp<-row.names(mytable)
+mytable$comp<- gsub("_", "-", mytable$comp)
+
+# comparisons between intraspecific crosses
+interspe<-melt.data.frame(mytable[7:9,], measure.vars = c("down", "up"))
+interspe$comp<-factor(interspe$comp, levels=c("CC-AA", "PP-AA", "PP-CC"))
+levels(interspe$comp)[levels(interspe$comp)=="CC-AA"] <- "[CC]-[AA]"
+levels(interspe$comp)[levels(interspe$comp)=="PP-AA"] <- "[PP]-[AA]"
+levels(interspe$comp)[levels(interspe$comp)=="PP-CC"] <- "[PP]-[CC]"
+
+# comparisons between hybrids and intraspecific crosses
+hyb<-melt.data.frame(mytable[10:15,], measure.vars = c("down", "up"))
+hyb$comp<-factor(hyb$comp, levels=c("AP-intra", "PA-intra",
+                                    "CP-intra", "PC-intra",
+                                    "AC-intra", "CA-intra"))
+
+# comparisons between reciprocal crosses
+recip<-melt.data.frame(mytable[1:6,], measure.vars = c("down", "up"))
+recip$comp<-factor(recip$comp,levels= c("AA1-AA2", "CC1-CC2", "PP1-PP2", "AC-CA", "AP-PA", "CP-PC"))
+
+mygraph<- function (data){
+  ggplot(data, aes(comp, value)) +
+  theme_bw() + 
+  theme(panel.grid = element_blank()) +
+  scale_fill_manual(values = c("#d71027", "#4575b4")) +
+  #scale_y_continuous(limits = c(0, 4500)) +
+  geom_bar(aes(fill = variable), stat="identity", position="dodge", width=.5) +
+  labs(x = "", y = "") +
+    theme(axis.ticks = element_line(size = 0.5, colour="black"),
+          axis.text.x=element_text(size=11, color="black",angle=-45, hjust=0),
+          axis.text.y=element_text(size=10, color="black"),
+          #axis.ticks=element_line(size = ),
+          #axis.ticks.length = unit(.85, "cm"),
+          axis.title.x = element_text(size = 10 , color="black" ,vjust=-2 ),
+          axis.title.y = element_text(size = 10 , color="black" ,vjust=4 ),
+          axis.ticks.length = unit(0.2, "cm"),
+          axis.line = element_line(size = 0.5),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          panel.border= element_blank(),
+          legend.position="none",
+          #panel.spacing = unit(c(105,105,105,0.1),"cm"),
+          #panel.margin = unit(c(105,105,105,0.1),"cm"),
+          plot.margin = unit(c(1,0.5,0,0), "cm")) 
+}
+
+
+interg<-mygraph(interspe)
+hybg<-mygraph(hyb)
+recipg<-mygraph(recip)
+
+interg <- ggplot_gtable(ggplot_build(interg))
+hybg<- ggplot_gtable(ggplot_build(hybg))
+recipg <- ggplot_gtable(ggplot_build(recipg))
+
+pdf(file="histogram_dge.pdf", height=4, width=10, family="ArialMT")
+grid.arrange(hybg, recipg,interg,ncol=3, heights=1)
+dev.off()
+
+rm(interg)
+rm(hybg)
+rm(recipg)
